@@ -3,9 +3,14 @@
 
 var VERSION = "0.1.0";
 var mraa = require('mraa'); //require mraa
-var request = require('request');
+//var request = require('request');
 console.log('MRAA Version: ' + mraa.getVersion()); //write the mraa version to the console
 console.log("Edison Strength Test v"+VERSION);
+
+var http = require('http'),
+    os = require("os"),
+    fs =  require("fs"),
+    led_strip = require('./LEDStrip.js');
 
 /* CONFIGURATION VARIABLES */
 var FRAMERATE = 118; //How often to run each second
@@ -16,11 +21,12 @@ var FILTER_MIN = 119; //Lowest analog read
 var FILTER_RANGE = 52; //How far away the analog value should be from min and max to ignore
 var FILTER_RANGE_MULTIPLIER = 1; //By how much should the analog value change inbetween reads?
 var RESOLUTION = 5; //The size of one dash
-var SHOW_LAST_VALUE_LOGS = true;
+var SHOW_LAST_VALUE_LOGS = false;
 var SHOW_GRAPH = true;
 var FELKER_DIGITAL_MEDIA = false; //Share data through that server
 var FELKER_DIGITAL_MEDIA_SEND_RECORD = false; //Don't share all seismic data, but do post the records
 var IOT_DASHBOARD = true; //Share data through IoT Dashboard
+var SHOW_LED_STRIP = true;
 
 /* COMMON VARIABLES */
 var filtered = 0;
@@ -34,6 +40,78 @@ var v = analogPin0.read();
 
 /* CLASSES */
 //COMMS
+function sendIoTViaUdp() {
+    var dgram = require('dgram');
+    var client = dgram.createSocket('udp4');
+
+    var day = 86400000;
+    // Sample data, replace it desired values
+    var data = [{
+        sensorName : "seismometer",
+        sensorType: "seismometer.v1.0",
+        observations: [{
+            on: new Date().getTime(),
+            value: ""+getSeismicMagnitude()
+        }]
+    }];
+
+    // UDP Options
+    var options = {
+        host : '127.0.0.1',
+        port : 41234
+    };
+
+    function registerNewSensor(name, type, callback){
+        var msg = JSON.stringify({
+            n: name,
+            t: type
+        });
+
+        var sentMsg = new Buffer(msg);
+        console.log("Registering sensor: " + sentMsg);
+        client.send(sentMsg, 0, sentMsg.length, options.port, options.host, callback);
+    };
+
+    function sendObservation(name, value, on){
+        var msg = JSON.stringify({
+            n: name,
+            v: value,
+            on: on
+        });
+
+        var sentMsg = new Buffer(msg);
+        console.log("Sending observation: " + sentMsg);
+        client.send(sentMsg, 0, sentMsg.length, options.port, options.host);
+    };
+
+    client.on("message", function(mesg, rinfo){
+        console.log('UDP message from %s:%d', rinfo.address, rinfo.port);
+        var a = JSON.parse(mesg);
+        console.log(" m ", JSON.parse(mesg));
+
+        if (a.b == 5) {
+            client.send(message, 0, message.length, PORT, HOST, function(err, bytes) {
+                if (err) throw err;
+                console.log('UDP message sent to ' + HOST +':'+ PORT);
+                // client.close();
+
+            });
+        }
+    });
+
+
+    data.forEach(function(item) {
+        registerNewSensor(item.sensorName, item.sensorType, function () {
+            item.observations.forEach(function (observation) {
+                setTimeout(function () {
+                    sendObservation(item.sensorName, observation.value, observation.on);
+                }, 1000);
+            });
+        });
+    });   
+}
+
+
 function Communications() {
     this.lastmessage = 0;
     console.log("Starting communications");
@@ -95,19 +173,136 @@ function Communications() {
             v: getSeismicMagnitude()+"",
             on: new Date().getTime()
         };
-        this.server.send(JSON.stringify(json), 0, JSON.stringify(json).length, port, address, function(res) {
-            console.log(res); 
+        console.log("Send "+JSON.stringify(json));
+        try {
+            var message = new Buffer(JSON.stringify(json) || "DEADBEAT");
+            this.server.setBroadcast(true);
+            this.server.send(message, 0, message.length || 8, port, ipaddress, function(err, bytes) {
+                try {
+                    if(err != null)
+                        console.error("Error in sending out IP Address: ",err);
+                    else if(err != null && err != undefined && bytes != null & bytes != undefined) {
+                        console.log("Sent out broadcast #x; "+bytes+" bytes"/*+dateString*/);
+                    }
+                } catch(errx) {
+                    //Issue with broadcasts' afterward function
+                    console.error(errx);
+                    restartCommunications();
+                }
+            });
+        } catch(e) {
+            console.error("Something serious happened, restart server", e);
+            restartCommunications();
+        }
+        
+        /*try {
+            console.log(JSON.stringify(json));
+            var buffer = new Buffer(JSON.stringify(json));
+            if(buffer !== undefined) {
+                this.server.send(buffer, 0, buffer.length, port, ipaddress, function(err, bytes) {
+                    try {
+                        console.log("Sent data: got response "+bytes+"b; "+err); 
+                    } catch(e) {
+                        console.error("Oncomplete error "+e.message);   
+                    }
+                });
+            } else {
+                console.error("Buffer undefined for "+JSON.stringify(json));
+            }   
+        } catch(e) {
+            console.error(e.message+"");   
+        }*/
+    }
+    this.registerNewSensor = function(name, type, callback){
+        var msg = JSON.stringify({
+            n: name,
+            t: type
         });
+        var ipaddress = "127.0.0.1";
+        var port = 41234;
+        var sentMsg = new Buffer(msg);
+        console.log("Registering sensor: " + sentMsg);
+        this.server.send(sentMsg, 0, sentMsg.length, port, ipaddress, callback);
+    };
+    this.server.on("message", function(mesg, rinfo){
+        console.log('UDP message from %s:%d', rinfo.address, rinfo.port);
+        var a = JSON.parse(mesg);
+        console.log(" m ", JSON.parse(mesg));
+
+        if (a.b == 5) {
+            this.server.send(message, 0, message.length, PORT, HOST, function(err, bytes) {
+                if (err) throw err;
+                console.log('UDP message sent to ' + HOST +':'+ PORT);
+                // client.close();
+
+            });
+        }
+    });
+    this.putIoTData = function() {
+        // HTTP Headers
+        var msg = JSON.stringify({ 
+            "s": "seismometer", 
+            "v": getSeismicMagnitude() 
+        });
+        var putHeaders = {
+            'Content-Type' : 'application/json',
+            'Content-Length' : Buffer.byteLength(msg, 'utf8')
+        };
+
+        // HTTP Options 
+        var putOpts = {
+            host : '127.0.0.1',
+            port : 8080,
+            path : '/data',
+            method : 'PUT',
+            headers : putHeaders
+        };
+
+        // Do the POST call
+        var putReq = http.request(putOpts, function(res) {
+            console.log("statusCode: ", res.statusCode);
+            res.on('data', function(d) {
+                console.info('PUT result:\n');
+                process.stdout.write(d);
+                console.info('\n\nPUT completed');
+            });
+        });
+
+        // Write JSON data
+        putReq.write(msg);
+        putReq.end();
+        putReq.on('error', function(e) {
+            console.error("Put request error", e);
+        });   
     }
     console.log("Connected to the Internet with IP Addresses: ",JSON.stringify(this.getIP())+" on port "+this.PORT);
 }
-
+var communications;
 function closeCommunications() {
     try {
-        comm.server.close();
-        clearTimeout(comm.repeater);
+        communications.server.close();
+//        clearTimeout(communications.repeater);
         console.log("Reset");
     } catch(e) {}   
+}
+function restartCommunications() {
+    setTimeout(function() {
+        closeCommunications();
+        try {
+            communications = new Communications();
+            console.log("Currently looking for my buddy, the Internet");
+            /*communications.registerNewSensor("seismometer", "seismometer.v1.0", function(err, bytes) {
+                console.log("response from registration");
+                console.log("Data["+bytes+"b] "+err);
+            });*/
+            setTimeout(function() {
+                
+            }, 50);
+        } catch(e) {
+            console.error("comm = new Comm", e);   
+        }
+    }, 400);
+    console.log("Restarting comms");
 }
 
 //PIN CLASS
@@ -203,11 +398,19 @@ var led_direction = [0, 1, 1, -1]; //For gameState = 0
 var maxValue = 0;
 var magnitude = 0;
 var calibrated = 0;
+var leds;
 function setup() {
-    pinManager.addNewPin("NewGame", new Pin(2, PINMANAGER.INPUT, 0));
-    pinManager.addNewPin("LED1", new Pin(3, PINMANAGER.PWM, 0));
-    pinManager.addNewPin("LED2", new Pin(5, PINMANAGER.PWM, 0.5));
-    pinManager.addNewPin("LED3", new Pin(6, PINMANAGER.PWM, 1));
+    require('dns').lookup('myhost.local', console.log);
+    pinManager.addNewPin("NewGame", new Pin(7, PINMANAGER.INPUT, 0));
+//    pinManager.addNewPin("LED1", new Pin(3, PINMANAGER.PWM, 0));
+//    pinManager.addNewPin("LED2", new Pin(5, PINMANAGER.PWM, 0.5));
+//    pinManager.addNewPin("LED3", new Pin(6, PINMANAGER.PWM, 1));
+//    restartCommunications();
+    var spi = new m.Spi(0);
+    // pass SPI and number of leds 
+    leds = new LEDStrip(spi,32); //8*4
+    // setup leds
+    leds.setup();
 }
 function loop() {
 //    console.log(pinManager.get("NewGame").read());
@@ -222,19 +425,21 @@ function loop() {
             maxValue = 0;
             magnitude = 0;
             calibrated = 0;
-            pinManager.get("LED1").write(0.01);
+            /*pinManager.get("LED1").write(0.01);
             pinManager.get("LED2").write(0);
-            pinManager.get("LED3").write(0);
+            pinManager.get("LED3").write(0);*/
+            leds.fill(leds.color(0, 255, 0));
         } else if(gameState == 1) {
             gameState = 0;
             console.log("Resetting");
-            pinManager.get("LED1").write(0);
+            /*pinManager.get("LED1").write(0);
             pinManager.get("LED2").write(0.5);
-            pinManager.get("LED3").write(1);
+            pinManager.get("LED3").write(1);*/
+            leds.fill(leds.color(0, 0, 255));
         }
     } else {
         if(gameState == 0) {
-            var p = pinManager.get("LED"+1);
+            /*var p = pinManager.get("LED"+1);
 //            console.log("LED"+1+" = "+p.getValue()+"  "+led_direction[1]);
             for(var i = 1;i<=3;i++) {
                 var p = pinManager.get("LED"+i);
@@ -244,31 +449,44 @@ function loop() {
 //                console.log("LED"+i+" = "+p.getValue()+"  "+led_direction[i]);
                 p.write(Math.min(Math.max(p.getValue()+led_direction[i]/FRAMERATE, 0), 1));  
 //                p.write(1);
-            }
+            }*/
+            rainbow(10);
         } else {
             if(maxValue < Math.abs(getSeismicMagnitude())) {
-                pinManager.get("LED1").write(0);
+                /*pinManager.get("LED1").write(0);
                 pinManager.get("LED2").write(0);
-                pinManager.get("LED3").write(0);
+                pinManager.get("LED3").write(0);*/
                 
                 maxValue = Math.abs(getSeismicMagnitude());
-                var l1 = (maxValue>100)?1:maxValue/100;
+                var light_up = Math.round(maxValue/512*32);
+                var color = leds.color(255, 0, 0);
+                if(light_up > 8)
+                    color = leds.color(255, 255, 0);
+                if(light_up > 16)
+                    color = leds.color(0, 0, 255);
+                if(light_up > 24)
+                    color = leds.color(0, 255, 0);
+                for(var i = 0; i<light_up;i++) {
+                    leds.setPixel(i, color);   
+                }
+                
+                /*var l1 = (maxValue>100)?1:maxValue/100;
                 var l2 = Math.max((maxValue>200)?1:(maxValue-100)/100,0);
-                var l3 = Math.max((maxValue>300)?1:(maxValue-200)/100,0);
+                var l3 = Math.max((maxValue>300)?1:(maxValue-200)/100,0);*/
                 console.log("Highest reading is "+maxValue, l1, l2, l3);
                 //Send a POST request
-                if(FELKER_DIGITAL_MEDIA || FELKER_DIGITAL_MEDIA_SEND_RECORD) {
+                /*if(FELKER_DIGITAL_MEDIA || FELKER_DIGITAL_MEDIA_SEND_RECORD) {
                     request.post({url: 'http://felkerdigitalmedia.com/seismometer/postdata.php', form:
                         {magnitude:magnitude, timestamp:new Date().getTime(), accuracy:Math.round(100*filtered/records), record:1}
                      });
-                }
-                pinManager.get("LED1").write(l1);   
+                }*/
+                /*pinManager.get("LED1").write(l1);   
                 if(maxValue > 100)
-                    pinManager.get("LED2").write(l2);   
+                    pinManager.get("LED2").write(l2); */  
                 /*else
                     pinManager.get("LED2").write(0);*/
-                if(maxValue > 200)
-                    pinManager.get("LED3").write(l3);   
+//                if(maxValue > 200)
+//                    pinManager.get("LED3").write(l3);   
                 /*else
                     pinManager.get("LED3").write(0);*/
             } else {
@@ -283,7 +501,7 @@ function loop() {
 
 /* BACKGROUND FUNCTIONS */
 function getSeismicMagnitude() {
-    return magnitude-calibrated;
+    return Math.abs(magnitude-calibrated);
 }
 function doAnalogRead() {
     v = analogPin0.read();
@@ -352,10 +570,16 @@ function doAnalogRead() {
         if(SHOW_GRAPH)
             console.log(data+b);
 
-        if(FELKER_DIGITAL_MEDIA) {
+        /*if(FELKER_DIGITAL_MEDIA) {
             request.post({url: 'http://felkerdigitalmedia.com/seismometer/postdata.php', form:
                 {magnitude:magnitude, timestamp:new Date().getTime(), accuracy:Math.round(100*filtered/records), record:0}
              });
+        }*/        
+        if(IOT_DASHBOARD) {
+//            communications.sendIoTData(getSeismicMagnitude());   
+//            communications.putIoTData();
+            sendIoTViaUdp();
+//            console.log("Boop boop booop");
         }
     }
     /*if(Math.abs(v-512) < last_value)
@@ -364,3 +588,18 @@ function doAnalogRead() {
 setup(); //Start!
 setInterval(function() {doAnalogRead()}, 1000/FRAMERATE);
 setInterval(function() {loop()}, 1000/FRAMERATE);
+setInterval(function() {leds.update()}, 1000/24); //24fps
+
+//Severely handle issues
+process.on('exit', function() {
+  setTimeout(function() {
+    console.log('This will not run');
+  }, 0);    
+  console.log('About to exit.');
+});
+process.on('uncaughtException', function(err) {
+    if((err+"").indexOf("Timeout") == -1) {
+        console.error('MASSIVE Caught exception: ', err);
+        closeCommunications();
+    }
+});
