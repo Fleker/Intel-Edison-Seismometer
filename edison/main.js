@@ -9,24 +9,27 @@ console.log("Edison Strength Test v"+VERSION);
 
 var http = require('http'),
     os = require("os"),
-    fs =  require("fs"),
-    led_strip = require('./LEDStrip.js');
+    fs =  require("fs");
+//    led_strip = require('./LEDStrip.js');
 
 /* CONFIGURATION VARIABLES */
-var FRAMERATE = 118; //How often to run each second
+var FRAMERATE = 28; //How often to run each second
 var DISABLE_DIGITAL_FILTER = false; //If false, the software throws out irrelevant values
-var ENABLE_RUNNING_AVERAGE = true;
+var ENABLE_RUNNING_AVERAGE = false;
 var FILTER_MAX = 875; //Highest analog read
 var FILTER_MIN = 119; //Lowest analog read
 var FILTER_RANGE = 52; //How far away the analog value should be from min and max to ignore
-var FILTER_RANGE_MULTIPLIER = 1; //By how much should the analog value change inbetween reads?
-var RESOLUTION = 5; //The size of one dash
+var FILTER_RANGE_MULTIPLIER = 2.5; //By how much should the analog value change inbetween reads?
+var RESOLUTION = 10; //The size of one dash
 var SHOW_LAST_VALUE_LOGS = false;
-var SHOW_GRAPH = true;
-var FELKER_DIGITAL_MEDIA = false; //Share data through that server
-var FELKER_DIGITAL_MEDIA_SEND_RECORD = false; //Don't share all seismic data, but do post the records
-var IOT_DASHBOARD = true; //Share data through IoT Dashboard
+var SHOW_GRAPH = true && (FRAMERATE < 30);
+var LAN_ONLY = false; //Have no outside Internet connection
+var FELKER_DIGITAL_MEDIA = false && !LAN_ONLY; //Share data through that server
+var FELKER_DIGITAL_MEDIA_SEND_RECORD = false && !LAN_ONLY; //Don't share all seismic data, but do post the records
+var IOT_DASHBOARD = true && !LAN_ONLY; //Share data through IoT Dashboard
 var SHOW_LED_STRIP = true;
+var ENABLE_AUTO_CALIBRATE = true;
+var SEND_ALL_VALUES = true;
 
 /* COMMON VARIABLES */
 var filtered = 0;
@@ -37,10 +40,14 @@ var RUNNING_SUM_SIZE = (DISABLE_DIGITAL_FILTER)?60:3;
 var analogPin0 = new mraa.Aio(0); //setup access analog input Analog pin #0 (A0)
 var last_value = 0;
 var v = analogPin0.read();
+var i2c = new mraa.I2c(1);
+
 
 /* CLASSES */
 //COMMS
 function sendIoTViaUdp() {
+        if(Math.random() > 1/FRAMERATE || getSeismicMagnitude() <= 0)
+        return;
     var dgram = require('dgram');
     var client = dgram.createSocket('udp4');
 
@@ -50,8 +57,8 @@ function sendIoTViaUdp() {
         sensorName : "seismometer",
         sensorType: "seismometer.v1.0",
         observations: [{
-            on: new Date().getTime(),
-            value: ""+getSeismicMagnitude()
+            on: new Date().getTime()-1000*60*60*4-100,
+            value: getSeismicMagnitude()
         }]
     }];
 
@@ -93,7 +100,7 @@ function sendIoTViaUdp() {
             client.send(message, 0, message.length, PORT, HOST, function(err, bytes) {
                 if (err) throw err;
                 console.log('UDP message sent to ' + HOST +':'+ PORT);
-                // client.close();
+//                 client.close();
 
             });
         }
@@ -304,6 +311,13 @@ function restartCommunications() {
     }, 400);
     console.log("Restarting comms");
 }
+function sendI2CData(data) {
+//    console.log("I2C "+data);
+    i2c.address(0x02);
+    var buffer = new Buffer(data);
+//    var strBuf = buffer.toString('ascii');
+    i2c.write(buffer);   
+}
 
 //PIN CLASS
 function Pin(pin, direction, value) {
@@ -398,7 +412,7 @@ var led_direction = [0, 1, 1, -1]; //For gameState = 0
 var maxValue = 0;
 var magnitude = 0;
 var calibrated = 0;
-var leds;
+//var leds;
 function setup() {
     require('dns').lookup('myhost.local', console.log);
     pinManager.addNewPin("NewGame", new Pin(7, PINMANAGER.INPUT, 0));
@@ -406,17 +420,23 @@ function setup() {
 //    pinManager.addNewPin("LED2", new Pin(5, PINMANAGER.PWM, 0.5));
 //    pinManager.addNewPin("LED3", new Pin(6, PINMANAGER.PWM, 1));
 //    restartCommunications();
-    var spi = new m.Spi(0);
+//    var spi = new m.Spi(0);
     // pass SPI and number of leds 
-    leds = new LEDStrip(spi,32); //8*4
+//    leds = new LEDStrip(spi,32); //8*4
     // setup leds
-    leds.setup();
+    
+    sendI2CData("RANDOM");
+    if(SEND_ALL_VALUES)
+        sendI2CData("SEND_ALL");
+    else
+        sendI2CData("HIDE_ALL");
+//    leds.setup();
 }
 function loop() {
 //    console.log(pinManager.get("NewGame").read());
     if(pinManager.get("NewGame").read() == 1 && !newGamePressed) {
         newGamePressed = true;
-        console.log("Release to reset");
+        console.log("Release to change state");
     } else if(pinManager.get("NewGame").read() == 0 && newGamePressed) {
         newGamePressed = false;
         if(gameState == 0) {
@@ -428,14 +448,16 @@ function loop() {
             /*pinManager.get("LED1").write(0.01);
             pinManager.get("LED2").write(0);
             pinManager.get("LED3").write(0);*/
-            leds.fill(leds.color(0, 255, 0));
+//            leds.fill(leds.color(0, 255, 0));
+            sendI2CData("START");
         } else if(gameState == 1) {
             gameState = 0;
             console.log("Resetting");
             /*pinManager.get("LED1").write(0);
             pinManager.get("LED2").write(0.5);
             pinManager.get("LED3").write(1);*/
-            leds.fill(leds.color(0, 0, 255));
+//            leds.fill(leds.color(0, 0, 255));
+            sendI2CData("RANDOM");
         }
     } else {
         if(gameState == 0) {
@@ -450,7 +472,7 @@ function loop() {
                 p.write(Math.min(Math.max(p.getValue()+led_direction[i]/FRAMERATE, 0), 1));  
 //                p.write(1);
             }*/
-            rainbow(10);
+//            rainbow(10);
         } else {
             if(maxValue < Math.abs(getSeismicMagnitude())) {
                 /*pinManager.get("LED1").write(0);
@@ -458,8 +480,8 @@ function loop() {
                 pinManager.get("LED3").write(0);*/
                 
                 maxValue = Math.abs(getSeismicMagnitude());
-                var light_up = Math.round(maxValue/512*32);
-                var color = leds.color(255, 0, 0);
+//                var light_up = Math.round(maxValue/512*32);
+                /*var color = leds.color(255, 0, 0);
                 if(light_up > 8)
                     color = leds.color(255, 255, 0);
                 if(light_up > 16)
@@ -468,31 +490,13 @@ function loop() {
                     color = leds.color(0, 255, 0);
                 for(var i = 0; i<light_up;i++) {
                     leds.setPixel(i, color);   
-                }
-                
-                /*var l1 = (maxValue>100)?1:maxValue/100;
-                var l2 = Math.max((maxValue>200)?1:(maxValue-100)/100,0);
-                var l3 = Math.max((maxValue>300)?1:(maxValue-200)/100,0);*/
-                console.log("Highest reading is "+maxValue, l1, l2, l3);
-                //Send a POST request
-                /*if(FELKER_DIGITAL_MEDIA || FELKER_DIGITAL_MEDIA_SEND_RECORD) {
-                    request.post({url: 'http://felkerdigitalmedia.com/seismometer/postdata.php', form:
-                        {magnitude:magnitude, timestamp:new Date().getTime(), accuracy:Math.round(100*filtered/records), record:1}
-                     });
                 }*/
-                /*pinManager.get("LED1").write(l1);   
-                if(maxValue > 100)
-                    pinManager.get("LED2").write(l2); */  
-                /*else
-                    pinManager.get("LED2").write(0);*/
-//                if(maxValue > 200)
-//                    pinManager.get("LED3").write(l3);   
-                /*else
-                    pinManager.get("LED3").write(0);*/
-            } else {
-                /*pinManager.get("LED1").write(0);
-                pinManager.get("LED2").write(0);
-                pinManager.get("LED3").write(0);*/
+                setTimeout(function() {
+                    sendI2CData(getSeismicMagnitude()+" ");
+                }, 0);
+                
+                console.log("Highest reading is "+maxValue/*, l1, l2, l3*/);
+                //Send a POST request
             }
         }
     }
@@ -501,7 +505,10 @@ function loop() {
 
 /* BACKGROUND FUNCTIONS */
 function getSeismicMagnitude() {
-    return Math.abs(magnitude-calibrated);
+    if(ENABLE_AUTO_CALIBRATE)
+        return Math.abs(Math.max(magnitude-calibrated,0));
+    else
+        return Math.abs(magnitude);
 }
 function doAnalogRead() {
     v = analogPin0.read();
@@ -581,6 +588,12 @@ function doAnalogRead() {
             sendIoTViaUdp();
 //            console.log("Boop boop booop");
         }
+        if(SEND_ALL_VALUES && gameState == 1) {
+            setTimeout(function() {
+                        sendI2CData(getSeismicMagnitude()+" ");
+                    }, 0);
+        }
+                
     }
     /*if(Math.abs(v-512) < last_value)
         last_value = Math.abs(v-512);*/
@@ -588,7 +601,7 @@ function doAnalogRead() {
 setup(); //Start!
 setInterval(function() {doAnalogRead()}, 1000/FRAMERATE);
 setInterval(function() {loop()}, 1000/FRAMERATE);
-setInterval(function() {leds.update()}, 1000/24); //24fps
+//setInterval(function() {leds.update()}, 1000/24); //24fps
 
 //Severely handle issues
 process.on('exit', function() {

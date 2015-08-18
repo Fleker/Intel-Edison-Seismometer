@@ -1,8 +1,8 @@
 {
   "name": "Seismometer",
   "description": "Used for a `Test Your Strength` style game, this device measures seismic data, filters it, and allows users to play the game. It also connects to an IoT Dashboard",
-  "version": "0.9.3",
-  "main": "striptest.js",
+  "version": "0.9.5",
+  "main": "main.js",
   "engines": {
     "node": ">=0.10.0"
   },
