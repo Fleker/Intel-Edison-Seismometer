@@ -1,4 +1,4 @@
-# intel_edison_seismometer
+# Intel-Edison-Seismometer
 A seismometer / "Test Your Strength" game built with the Intel Edison
 
 * Works with Intel's IoT Dashboard to store data
